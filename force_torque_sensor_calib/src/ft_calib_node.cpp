@@ -69,9 +69,8 @@ public:
 		spinner->start();
 
 
-
+		getROSParameters();
 		topicSub_ft_raw_ = n_.subscribe("ft_raw", 1, &FTCalibNode::topicCallback_ft_raw, this);
-		topicSub_Accelerometer_ = n_.subscribe("imu", 1, &FTCalibNode::topicCallback_imu, this);
 
 		m_pose_counter = 0;
 		m_ft_counter = 0;
@@ -80,18 +79,16 @@ public:
 		m_received_imu = false;
 
 		m_finished = false;
-		m_tf_listener = new tf::TransformListener();
+        m_tf_listener = std::make_shared<tf2_ros::TransformListener>(tfBuffer);
 
-		m_ft_calib = new FTCalib();
+		m_ft_calib = new FTCalib(m_local_gravitational_acceleration);
 	}
 
 	~FTCalibNode()
 	{
-		saveCalibData();
 		delete spinner;
 		delete m_group;
 		delete m_ft_calib;
-		delete m_tf_listener;
 	}
 
 
@@ -128,7 +125,6 @@ public:
         {
             n_.getParam("calib_file_dir", m_calib_file_dir);
         }
-
         else
         {
             ROS_WARN("No calib_file_dir parameter, setting to default '~/.ros/ft_calib' ");
@@ -172,6 +168,24 @@ public:
             return false;
         }
 
+		if(n_.hasParam("fixed_frame_id"))
+		{
+			n_.getParam("fixed_frame_id", m_fixed_frame_id);
+		}
+		else{
+			ROS_ERROR("NO fixed_frame_id, shutting down node ...");
+			n_.shutdown();
+			return false;
+		}
+
+		if(n_.hasParam("local_gravitational_acceleration"))
+		{
+			n_.getParam("local_gravitational_acceleration", m_local_gravitational_acceleration);
+		}
+		else{
+			ROS_INFO("No local_gravity_acceleration, setting to 9.80665");
+			m_local_gravitational_acceleration = 9.80665;
+		}
 
         // whether the user wants to use random poses
         n_.param("random_poses", m_random_poses, false);
@@ -203,9 +217,9 @@ public:
 
         std::stringstream meas_file_header;
 
-        meas_file_header << "\% gravity , f/t measurements all expressed in F/T sensor frame\n";
-        meas_file_header << "\% [gx, gy, gz, fx, fy, fz, tx, ty, tz]\n";
-
+        meas_file_header << "\% rotation from sensor frame to fixed frame , f/t measurements all expressed in F/T sensor frame\n";
+		meas_file_header << "\% fixed frame id: "<<m_fixed_frame_id<<"\n";
+        meas_file_header << "\% [rot_qx, rot_qy, rot_qz, rot_qw, fx, fy, fz, tx, ty, tz]\n";
         meas_file << meas_file_header.str();
 
         meas_file.close();
@@ -311,15 +325,10 @@ public:
 
 	// prints out the pose (3-D positions) of the calibration frame at each of the positions
 	// of the left arm
-	void saveCalibData()
+	void saveCalibData(double &mass, Eigen::Vector3d& g_in_base,
+				Eigen::Vector3d &center_mass_in_sensor_frame, 
+				Eigen::Vector3d &f_bias, Eigen::Vector3d &t_bias)
 	{
-		double mass;
-		Eigen::Vector3d COM_pos;
-		Eigen::Vector3d f_bias;
-		Eigen::Vector3d t_bias;
-
-		getCalib(mass, COM_pos, f_bias, t_bias);
-
 		XmlRpc::XmlRpcValue bias;
 		bias.setSize(6);
 		for(unsigned int i=0; i<3; i++)
@@ -331,17 +340,24 @@ public:
 		XmlRpc::XmlRpcValue COM_pose;
 		COM_pose.setSize(6);
 		for(unsigned int i=0; i<3; i++)
-			COM_pose[i] = (double)COM_pos(i);
+			COM_pose[i] = (double)center_mass_in_sensor_frame(i);
 
 		for(unsigned int i=0; i<3; i++)
 			COM_pose[i+3] = 0.0;
+
+		XmlRpc::XmlRpcValue fixed_frame_gravity;
+		fixed_frame_gravity.setSize(3);
+
+		for(unsigned int i=0; i<3; i++)
+			fixed_frame_gravity[i] = g_in_base(i);
 
 		// set the parameters in the parameter server
 		n_.setParam("/ft_calib/bias", bias);
 		n_.setParam("/ft_calib/gripper_mass", mass);
 		n_.setParam("/ft_calib/gripper_com_frame_id", m_ft_raw.header.frame_id.c_str());
 		n_.setParam("/ft_calib/gripper_com_pose", COM_pose);
-
+		n_.setParam("/ft_calib/fixed_frame_id", m_fixed_frame_id.c_str());
+		n_.setParam("/ft_calib/fixed_frame_gravity", fixed_frame_gravity);
 		// dump the parameters to YAML file
 		std::string file = m_calib_file_dir + std::string("/") + m_calib_file_name;
 
@@ -356,14 +372,15 @@ public:
 	}
 
     // saves the gravity and force-torque measurements to a file for postprocessing
-    void saveMeasurements(geometry_msgs::Vector3Stamped gravity, geometry_msgs::WrenchStamped ft_meas)
+    void saveMeasurements(geometry_msgs::TransformStamped transform_sensor_to_base, geometry_msgs::WrenchStamped ft_meas)
     {
         std::ofstream meas_file;
         meas_file.open((m_meas_file_dir + "/" + m_meas_file_name).c_str(), std::ios::out | std::ios::app);
 
         std::stringstream meas_file_text;
 
-        meas_file_text << gravity.vector.x << " " << gravity.vector.y << " " << gravity.vector.z << " ";
+        meas_file_text << transform_sensor_to_base.transform.rotation.x << " " << transform_sensor_to_base.transform.rotation.y << " " 
+					   << transform_sensor_to_base.transform.rotation.z << " " << transform_sensor_to_base.transform.rotation.w << " ";
         meas_file_text << ft_meas.wrench.force.x << " " << ft_meas.wrench.force.y << " " << ft_meas.wrench.force.z << " ";
         meas_file_text << ft_meas.wrench.torque.x << " " << ft_meas.wrench.torque.y << " " << ft_meas.wrench.torque.z << "\n";
 
@@ -383,16 +400,6 @@ public:
 		ROS_DEBUG("In ft sensorcallback");
 		m_ft_raw = *msg;
 		m_received_ft = true;
-	}
-
-
-	// gets readings from accelerometer and transforms them to the FT sensor frame
-	void topicCallback_imu(const sensor_msgs::Imu::ConstPtr &msg)
-	{
-		ROS_DEBUG("In accelerometer read callback");
-
-		m_imu= *msg;
-		m_received_imu = true;
 	}
 
 	void addMeasurement()
@@ -421,31 +428,24 @@ public:
 			return;
 		}
 
-		// express gravity vector in F/T sensor frame
-		geometry_msgs::Vector3Stamped gravity;
-		gravity.header.stamp = ros::Time();
-		gravity.header.frame_id = m_imu.header.frame_id;
-		gravity.vector = m_imu.linear_acceleration;
-
-		geometry_msgs::Vector3Stamped gravity_ft_frame;
-
+		geometry_msgs::TransformStamped transform_sensor_to_base;
 		try
-		{
-			m_tf_listener->transformVector(m_ft_raw.header.frame_id, gravity, gravity_ft_frame);
-		}
+        {
+            transform_sensor_to_base = tfBuffer.lookupTransform(m_ft_avg.header.frame_id, m_fixed_frame_id, ros::Time(0), ros::Duration(4.0));
+        }
+        catch (tf2::TransformException& ex)
+        {
+            ROS_ERROR("%s", ex.what());
+            return;
+        }
 
-		catch(tf::TransformException &ex)
-		{
-			ROS_ERROR("Error transforming accelerometer reading to the F/T sensor frame");
-			ROS_ERROR("%s.", ex.what());
-			return;
-		}
-
-		m_ft_calib->addMeasurement(gravity_ft_frame, m_ft_avg);
-        saveMeasurements(gravity_ft_frame, m_ft_avg);
+		m_ft_calib->addMeasurement(transform_sensor_to_base, m_ft_avg);
+        saveMeasurements(transform_sensor_to_base, m_ft_avg);
 	}
 
-	void getCalib(double &mass, Eigen::Vector3d &COM_pos, Eigen::Vector3d &f_bias, Eigen::Vector3d &t_bias)
+	void getCalib(double &mass, Eigen::Vector3d& g_in_base,
+				Eigen::Vector3d &center_mass_in_sensor_frame, 
+				Eigen::Vector3d &f_bias, Eigen::Vector3d &t_bias)
 	{
 
 		Eigen::VectorXd ft_calib = m_ft_calib->getCalib();
@@ -456,20 +456,19 @@ public:
 			ROS_ERROR("Error in estimated mass (<= 0)");
 			//		return;
 		}
+		g_in_base = ft_calib.segment<3>(1);
+		center_mass_in_sensor_frame = ft_calib.segment<3>(4);
 
-		Eigen::Vector3d center_mass_position(ft_calib(1)/mass,
-				ft_calib(2)/mass,
-				ft_calib(3)/mass);
-
-		COM_pos = center_mass_position;
-
+		f_bias = -ft_calib.segment<3>(7); 
+		t_bias = -ft_calib.segment<3>(10);
+		/*
 		f_bias(0) = -ft_calib(4);
 		f_bias(1) = -ft_calib(5);
 		f_bias(2) = -ft_calib(6);
 		t_bias(0) = -ft_calib(7);
 		t_bias(1) = -ft_calib(8);
 		t_bias(2) = -ft_calib(9);
-
+		*/
 	}
 
 	void averageFTMeas()
@@ -517,11 +516,9 @@ private:
 	geometry_msgs::WrenchStamped m_ft_raw;
 	geometry_msgs::WrenchStamped m_ft_avg; // average over 100 measurements
 
-	// accelerometer readings
-	sensor_msgs::Imu m_imu;
 
-	tf::TransformListener *m_tf_listener;
-
+	std::shared_ptr<tf2_ros::TransformListener> m_tf_listener;
+	tf2_ros::Buffer tfBuffer;
 	//	***** ROS parameters ***** //
 	// name of the moveit group
 	std::string m_moveit_group_name;
@@ -547,10 +544,14 @@ private:
 	// default: false
 	bool m_random_poses;
 
+	// frame id of a fixed frame, e.g. "base"
+	std::string m_fixed_frame_id; 
+
 	// number of random poses
 	// default: 30
 	int m_number_random_poses;
 
+	double m_local_gravitational_acceleration;
 };
 
 int main(int argc, char **argv)
@@ -559,12 +560,7 @@ int main(int argc, char **argv)
 	ros::NodeHandle nh;
 
 	FTCalibNode ft_calib_node;
-	if(!ft_calib_node.getROSParameters())
-	{
-		ft_calib_node.n_.shutdown();
-		ROS_ERROR("Error getting ROS parameters");
-
-	}
+	
 	ft_calib_node.init();
 
 	/// main loop
@@ -602,21 +598,26 @@ int main(int argc, char **argv)
 				ret = false;
 				n_measurements = 0;
 
-				ft_calib_node.addMeasurement(); // stacks up measurement matrices and FT measurementsa
+				ft_calib_node.addMeasurement(); // stacks up measurement matrices and FT measurement
 				double mass;
-				Eigen::Vector3d COM_pos;
+				Eigen::Vector3d center_mass_in_sensor_frame;
+				Eigen::Vector3d g_in_base_frame;
 				Eigen::Vector3d f_bias;
 				Eigen::Vector3d t_bias;
 
-				ft_calib_node.getCalib(mass, COM_pos, f_bias, t_bias);
+				ft_calib_node.getCalib(mass, g_in_base_frame, center_mass_in_sensor_frame, f_bias, t_bias);
 				std::cout << "-------------------------------------------------------------" << std::endl;
 				std::cout << "Current calibration estimate:" << std::endl;
 				std::cout << std::endl << std::endl;
 
 				std::cout << "Mass: " << mass << std::endl << std::endl;
 
+				std::cout << "gravity in fixed frame:" << std::endl;
+				std::cout << "[" << g_in_base_frame(0) << ", " << g_in_base_frame(1) << ", " << g_in_base_frame(2) << "]";
+				std::cout << std::endl << std::endl;
+				
 				std::cout << "Center of mass position (relative to FT sensor frame):" << std::endl;
-				std::cout << "[" << COM_pos(0) << ", " << COM_pos(1) << ", " << COM_pos(2) << "]";
+				std::cout << "[" << center_mass_in_sensor_frame(0) << ", " << center_mass_in_sensor_frame(1) << ", " << center_mass_in_sensor_frame(2) << "]";
 				std::cout << std::endl << std::endl;
 
 
@@ -627,7 +628,7 @@ int main(int argc, char **argv)
 
 
 				std::cout << "-------------------------------------------------------------" << std::endl << std::endl << std::endl;
-				ft_calib_node.saveCalibData();
+				ft_calib_node.saveCalibData(mass, g_in_base_frame, center_mass_in_sensor_frame, f_bias, t_bias);
 			}
 
 		}
@@ -636,8 +637,13 @@ int main(int argc, char **argv)
 		ros::spinOnce();
 		loop_rate.sleep();
 	}
-
-	ft_calib_node.saveCalibData();
+	double mass;
+	Eigen::Vector3d center_mass_in_sensor_frame;
+	Eigen::Vector3d g_in_base_frame;
+	Eigen::Vector3d f_bias;
+	Eigen::Vector3d t_bias;
+	ft_calib_node.getCalib(mass, g_in_base_frame, center_mass_in_sensor_frame, f_bias, t_bias);
+	ft_calib_node.saveCalibData(mass, g_in_base_frame, center_mass_in_sensor_frame, f_bias, t_bias);
 	ros::shutdown();
 	return 0;
 }

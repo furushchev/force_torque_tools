@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(force_torque_sensor_calib)
 
-find_package(catkin REQUIRED COMPONENTS cmake_modules roscpp sensor_msgs tf geometry_msgs moveit_core moveit_ros_planning moveit_ros_planning_interface tf_conversions eigen_conversions)
+find_package(catkin REQUIRED COMPONENTS cmake_modules roscpp sensor_msgs tf tf2 geometry_msgs moveit_core moveit_ros_planning moveit_ros_planning_interface tf_conversions eigen_conversions)
 find_package(Eigen3)
 if(NOT EIGEN3_FOUND)
   # Fallback to cmake_modules

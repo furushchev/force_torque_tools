@@ -1,6 +1,12 @@
 /*
  *  ft_calib.h
- *
+ *  Modified By Chuan QIN, July 2019
+ * 	Logs: 
+ *    * Remove the require for IMU sensor, the TF of manipulator is used instead.
+ *    * The base frame's inclination to ground is not required, only the local gravity acceleration is required (usually 9.81)
+ *    * In order to accelerate the calibration SVD process, the force and torque are calibrated separately
+ * 
+ * 	Original file infomation:
  *  Least squares calibration of:
  *  - Bias of F/T sensor
  *  - Mass of attached gripper
@@ -47,51 +53,52 @@
 #define FTCALIB_H_
 #include <geometry_msgs/Vector3Stamped.h>
 #include <geometry_msgs/WrenchStamped.h>
+#include <geometry_msgs/TransformStamped.h>
 #include <Eigen/Core>
 
 
 // Least Squares calibration of bias of FT sensor and the mass and location of the COM of the gripper
 namespace Calibration{
-class FTCalib
-{
-public:
+  class FTCalib
+  {
+  public:
 
-	FTCalib();
-	virtual ~FTCalib();
-
-
-	// adds a F/T measurement and the corresponding measurement matrix from the gravity
-	// measurements of the accelerometer
-	// gravity is assumed to be expressed in the F/T sensor frame
-	virtual void addMeasurement(const geometry_msgs::Vector3Stamped &gravity,
-			const geometry_msgs::WrenchStamped &ft_raw);
+    FTCalib(double local_gravity_acceleration);
+    virtual ~FTCalib();
 
 
-	// Least squares to estimate the F/T sensor parameters
-	// The estimated parameters are :
-	// [m m*cx m*cy m*cz FBx FBy FBz TBx TBy TBz]
-	// m: mass of the gripper
-	// [cx, cy, cz] are the coordinates of the center of mass of the gripper
-	// FB : force bias
-	// TB: torque bias
-	// All expressed in the FT sensor frame
-	virtual Eigen::VectorXd getCalib();
+    // adds a F/T measurement and the corresponding TF from fixed frame (usually the base of manipulator) to the sensor frame.
+    virtual void addMeasurement(const geometry_msgs::TransformStamped &tf_base_to_sensor,
+        const geometry_msgs::WrenchStamped &ft_raw);
+
+
+    // Least squares to estimate the F/T sensor parameters
+    // The estimated parameters are :
+    //                  [mass, 
+    //									 g_x_in_base, g_y_in_base, g_z_in_base,
+    //									 x_center_in_sensor_frame, y_center_in_sensor_frame, z_center_in_sensor_frame, 
+    //									 f_bias_x, f_bias_y, f_bias_z, 
+    //									 t_bias_x, t_bias_y, t_bias_z]
+    
+    virtual Eigen::VectorXd getCalib();
 
 
 
-protected:
+  protected:
 
-	Eigen::MatrixXd H; // stacked measurement matrices
-	Eigen::VectorXd Z; // stacked F/T measurements
-	// FT_sensor_frame_acc taken as 0
+    Eigen::MatrixXd stacked_A_force; // stacked measurement matrices for force
+    Eigen::MatrixXd stacked_A_biased_torque; // stacked measurement matrices for torque
 
-	unsigned int m_num_meas; // number of stacked measurements;
+    Eigen::VectorXd stacked_measured_force; // stacked force measurements by sensor
+    Eigen::VectorXd stacked_measured_torque; // stacked torque measurements by sensor
 
-	// measurement matrix based on "On-line Rigid Object Recognition and Pose Estimation
-	//  Based on Inertial Parameters", D. Kubus, T. Kroger, F. Wahl, IROS 2008
-    virtual Eigen::MatrixXd getMeasurementMatrix(const geometry_msgs::Vector3Stamped &gravity);
 
-};
+    unsigned int m_num_meas; // number of stacked measurements;
+    double m_local_gravitational_acceleration;
+    Eigen::Matrix<double, 3,6> getForceMeasurementMatrix(const geometry_msgs::TransformStamped &tf_base_to_sensor);
+    Eigen::Matrix<double, 3,6> getBiasedTorqueMeasurementMatrix(const geometry_msgs::WrenchStamped &ft_raw);
+
+  };
 }
 
 
