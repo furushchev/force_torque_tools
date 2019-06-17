@@ -7,9 +7,8 @@ find_package(catkin REQUIRED COMPONENTS cmake_modules roscpp geometry_msgs senso
 find_package(Boost REQUIRED COMPONENTS thread)
 
 catkin_package(
-  DEPENDS eigen
   CATKIN_DEPENDS geometry_msgs sensor_msgs tf tf_conversions eigen_conversions std_srvs
-  INCLUDE_DIRS include 
+  INCLUDE_DIRS include
   LIBRARIES gravity_compensation
 )
 
