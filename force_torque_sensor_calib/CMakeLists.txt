@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(force_torque_sensor_calib)
 
-find_package(catkin REQUIRED COMPONENTS cmake_modules roscpp sensor_msgs tf tf2 geometry_msgs moveit_core moveit_ros_planning moveit_ros_planning_interface tf_conversions eigen_conversions tf2_eigen)
+find_package(catkin REQUIRED COMPONENTS cmake_modules roscpp sensor_msgs tf tf2 geometry_msgs moveit_core moveit_ros_planning moveit_ros_planning_interface tf_conversions eigen_conversions tf2_eigen actionlib control_msgs)
 find_package(Eigen3)
 if(NOT EIGEN3_FOUND)
   # Fallback to cmake_modules
@@ -35,7 +35,10 @@ file(GLOB_RECURSE HEADERS include/${PROJECT_NAME}/*.h)
 add_executable(ft_calib_node src/ft_calib.cpp src/ft_calib_node.cpp ${HEADERS})
 target_link_libraries(ft_calib_node ${Boost_LIBRARIES} ${catkin_LIBRARIES})
 
-install(TARGETS ft_calib_node
+add_executable(ft_calib_simple_node src/ft_calib.cpp src/ft_calib_simple_node.cpp ${HEADERS})
+target_link_libraries(ft_calib_simple_node ${Boost_LIBRARIES} ${catkin_LIBRARIES})
+
+install(TARGETS ft_calib_node ft_calib_simple_node
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
