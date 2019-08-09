@@ -41,13 +41,16 @@
 #include <geometry_msgs/WrenchStamped.h>
 #include <ros/ros.h>
 #include <sensor_msgs/Imu.h>
+#include <sensor_msgs/JointState.h>
 #include <tf/tf.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_listener.h>
 #include <tf_conversions/tf_eigen.h>
+#include <urdf/model.h>
 #include <Eigen/Core>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 
 using namespace Calibration;
@@ -58,7 +61,9 @@ class FTCalibNode
   ros::NodeHandle n_;
   ros::AsyncSpinner *spinner;
   ros::Subscriber topicSub_ft_raw_;
+  ros::Subscriber topicSub_joint_states_;
   ros::Subscriber topicSub_Accelerometer_;
+  std::mutex joint_states_mutex_;
 
   FTCalibNode()
   {
@@ -68,6 +73,8 @@ class FTCalibNode
 
     getROSParameters();
     topicSub_ft_raw_ = n_.subscribe("ft_raw", 1, &FTCalibNode::topicCallback_ft_raw, this);
+    topicSub_joint_states_ =
+        n_.subscribe("joint_states", 1, &FTCalibNode::topicCallback_joint_states, this);
 
     m_pose_counter = 0;
     m_ft_counter = 0;
@@ -193,9 +200,15 @@ class FTCalibNode
       return false;
     }
 
-    if (n_.hasParam("pose_send_duration"))
+    if (n_.hasParam("pose_send_duration_rate"))
     {
-      n_.param("pose_send_duration", m_pose_send_duration, 10.0);
+      n_.param("pose_send_duration_rate", m_pose_send_duration_rate, 0.1);
+    }
+
+    if (!m_urdf_model.initParam("/robot_description"))
+    {
+      ROS_ERROR("Failed to initialize urdf model from robot_description");
+      return false;
     }
 
     // initialize the file with gravity and F/T measurements
@@ -246,6 +259,7 @@ class FTCalibNode
   // Calibrates the FT sensor by putting the arm in several different positions
   bool moveNextPose()
   {
+    ROS_INFO("move next!");
     if (m_pose_counter >= m_calibration_poses.size())
     {
       m_finished = true;
@@ -260,7 +274,7 @@ class FTCalibNode
       goal.trajectory.joint_names.push_back(joint_name_and_value.first);
       p.positions.push_back(joint_name_and_value.second);
     }
-    p.time_from_start = ros::Duration(m_pose_send_duration);
+    p.time_from_start = computeDuration(joint_angle);
     goal.trajectory.points.push_back(p);
 
     m_action_client->sendGoal(goal);
@@ -366,6 +380,17 @@ class FTCalibNode
   // finished moving the arm through the poses set in the config file
   bool finished() { return (m_finished); }
 
+  void topicCallback_joint_states(const sensor_msgs::JointState::ConstPtr &msg)
+  {
+    std::lock_guard<std::mutex> lock(joint_states_mutex_);
+    m_latest_joint_states.clear();
+    for (int i = 0; i < msg->name.size(); ++i)
+    {
+      m_latest_joint_states[msg->name[i]] = msg->position[i];
+    }
+    m_received_joint_states = true;
+  }
+
   void topicCallback_ft_raw(const geometry_msgs::WrenchStamped::ConstPtr &msg)
   {
     ROS_DEBUG("In ft sensorcallback");
@@ -388,6 +413,12 @@ class FTCalibNode
     if (!m_received_ft)
     {
       ROS_ERROR("Haven't received F/T sensor measurements");
+      return;
+    }
+
+    if (!m_received_joint_states)
+    {
+      ROS_ERROR("Haven't received joint states");
       return;
     }
 
@@ -459,16 +490,44 @@ class FTCalibNode
     }
     m_ft_counter++;
   }
-
- private:
   typedef std::map<std::string, double> JointAngleMap;
 
+  ros::Duration computeDuration(const JointAngleMap &next_pose)
+  {
+    std::lock_guard<std::mutex> lock(joint_states_mutex_);
+    ros::Duration max_duration = ros::Duration(0);
+    for (const auto &next_joint_name_and_angle : next_pose)
+    {
+      const std::string joint_name = next_joint_name_and_angle.first;
+      const double next_joint_angle = next_joint_name_and_angle.second;
+      const double current_joint_angle = m_latest_joint_states[joint_name];
+      const double diff_joint = std::abs(next_joint_angle - current_joint_angle);
+      const urdf::JointConstSharedPtr urdf_joint = m_urdf_model.getJoint(joint_name);
+      if (urdf_joint != nullptr)
+      {
+        const auto velocity_limit = urdf_joint->limits->velocity;
+        ros::Duration duration(diff_joint / velocity_limit / m_pose_send_duration_rate);
+        if (max_duration < duration)
+        {
+          max_duration = duration;
+        }
+      }
+      else
+      {
+        ROS_ERROR("failed to find joint %s on urdf", joint_name.c_str());
+      }
+    }
+    return max_duration;
+  }
+
+ private:
   unsigned int m_pose_counter;
   unsigned int m_ft_counter;
 
   bool m_finished;
 
   bool m_received_ft;
+  bool m_received_joint_states;
   bool m_received_imu;
 
   // ft calib stuff
@@ -505,10 +564,14 @@ class FTCalibNode
 
   std::vector<JointAngleMap> m_calibration_poses;
 
-  double m_pose_send_duration;
+  double m_pose_send_duration_rate;
+
+  JointAngleMap m_latest_joint_states;
 
   std::shared_ptr<actionlib::SimpleActionClient<control_msgs::FollowJointTrajectoryAction>>
       m_action_client;
+
+  urdf::Model m_urdf_model;
 };
 
 int main(int argc, char **argv)
